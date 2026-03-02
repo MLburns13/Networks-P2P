@@ -9,7 +9,8 @@
 
 ### Xuhang He
 
-- None yet
+- Protocol Codec + Framing 
+- State Store (Bitfields + Connection State) 
 
 # Code Introduction
 
