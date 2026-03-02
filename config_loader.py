@@ -1,4 +1,5 @@
 import math
+import os
 from dataclasses import dataclass
 from typing import List, Dict, Tuple
 
@@ -27,7 +28,7 @@ def _parse_kv_line(line: str) -> Tuple[str, str]:
         raise ValueError("expected 'key value' or 'key=value'")
     return parts[0].strip(), parts[1].strip()
 
-def parse_common_cfg(path: str = "cfg\\Common.cfg") -> Dict[str, object]:
+def parse_common_cfg(path: str = os.path.join("cfg", "Common.cfg")) -> Dict[str, object]:
     props = {}
     with open(path, 'r', encoding='utf-8') as f:
         for lineno, raw in enumerate(f, start=1):
@@ -53,7 +54,7 @@ def parse_common_cfg(path: str = "cfg\\Common.cfg") -> Dict[str, object]:
     
     return props
 
-def parse_peerinfo_cfg(path: str = "cfg\\PeerInfo.cfg") -> List[PeerInfo]:
+def parse_peerinfo_cfg(path: str = os.path.join("cfg", "PeerInfo.cfg")) -> List[PeerInfo]:
     peers: List[PeerInfo] = []
     seen_ids = set()
     with open(path, 'r', encoding='utf-8') as f:

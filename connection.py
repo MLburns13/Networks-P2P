@@ -14,6 +14,9 @@ class Connection:
         self.running = True
         self.name = name or f"{remote_addr}"
         self.recv_thread = threading.Thread(target=self._recv_loop, daemon=True, name=f"recv-{self.name}")
+
+    def start(self):
+        """Starts the background receive loop explicitly, so the creator has a chance to map this connection first."""
         self.recv_thread.start()
 
     def send(self, b: bytes):
