@@ -6,6 +6,10 @@ import config_loader
 import connection
 import protocol
 import state
+import random
+import struct
+from file_manager import FileManager
+from logger import PeerLogger
 
 class PeerNetwork:
     def __init__(self, my_peer_id: int, peers: List[config_loader.PeerInfo],
@@ -28,6 +32,12 @@ class PeerNetwork:
         self.running = False
         self.outgoing_retry_interval = 1.0
         self.outgoing_retry_attempts = 10
+        
+        self.my_index = -1
+        self.common = {}
+        self.file_manager: Optional[FileManager] = None
+        self.logger: Optional[PeerLogger] = None
+        self._completion_logged = False
 
     def start(self):
         my_entry = None
@@ -40,14 +50,27 @@ class PeerNetwork:
             raise ValueError(f"my_peer_id {self.my_peer_id} not found in PeerInfo list")
             
         # Initialize the global PeerState with numPieces from common properties
-        common = config_loader.parse_common_cfg()
-        num_pieces = common['numPieces']
+        self.common = config_loader.parse_common_cfg()
+        num_pieces = int(self.common["numPieces"])
+        file_name = str(self.common["FileName"])
+        file_size = int(self.common["FileSize"])
+        piece_size = int(self.common["PieceSize"])
+
         self.peer_state = state.PeerState(num_pieces, my_entry.has_file)
-        
+        self.file_manager = FileManager(
+            peer_id=self.my_peer_id,
+            file_name=file_name,
+            file_size=file_size,
+            piece_size=piece_size,
+            base_dir=".",
+        )
+        self.logger = PeerLogger(self.my_peer_id, base_dir=".")
+
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_sock.bind((self.bind_host, my_entry.port))
         self.server_sock.listen(50)
+
         self.running = True
         self.server_thread = threading.Thread(target=self._accept_loop, daemon=True, name="accept-loop")
         self.server_thread.start()
@@ -132,6 +155,154 @@ class PeerNetwork:
                     
             if not connected:
                 print(f"[PeerNetwork] FAILED to connect to {peer_to.peer_id} after {self.outgoing_retry_attempts} attempts")
+
+    def _get_conn_peer_id(self, conn: connection.Connection) -> Optional[int]:
+        with self.connections_lock:
+            for pid, c in self.connections.items():
+                if c is conn:
+                    return pid
+        return None
+
+    def _rekey_connection(self, old_id: int, new_id: int, conn: connection.Connection, framer: protocol.MessageFramer):
+        with self.connections_lock:
+            if new_id in self.connections and self.connections[new_id] is not conn:
+                raise RuntimeError(f"duplicate connection detected for {new_id}")
+            self.connections[new_id] = conn
+            self.framers[new_id] = framer
+            if old_id in self.connections:
+                del self.connections[old_id]
+            if old_id in self.framers:
+                del self.framers[old_id]
+
+    def _sync_interest_for_peer(self, remote_id: int, conn: connection.Connection):
+        assert self.peer_state is not None
+
+        missing = self.peer_state.get_interesting_pieces(remote_id)
+        interested = len(missing) > 0
+        current = self.peer_state.is_am_interested_in_peer(remote_id)
+
+        if interested and not current:
+            self.peer_state.set_am_interested(remote_id, True)
+            try:
+                conn.send(protocol.create_message(protocol.MsgType.INTERESTED))
+            except Exception as e:
+                print(f"[PeerNetwork] failed to send INTERESTED to {remote_id}: {e}")
+        elif not interested and current:
+            self.peer_state.set_am_interested(remote_id, False)
+            try:
+                conn.send(protocol.create_message(protocol.MsgType.NOT_INTERESTED))
+            except Exception as e:
+                print(f"[PeerNetwork] failed to send NOT_INTERESTED to {remote_id}: {e}")
+
+    def _broadcast_have(self, piece_index: int):
+        assert self.peer_state is not None
+        with self.connections_lock:
+            items = list(self.connections.items())
+
+        for pid, conn in items:
+            if pid <= 0:
+                continue
+            try:
+                conn.send(protocol.create_message(protocol.MsgType.HAVE, struct.pack(">I", piece_index)))
+            except Exception as e:
+                print(f"[PeerNetwork] failed to send HAVE({piece_index}) to {pid}: {e}")      
+
+    def _request_next_piece(self, remote_id: int):
+        assert self.peer_state is not None
+
+        conn = self.get_connection(remote_id)
+        if conn is None:
+            return
+
+        if self.peer_state.is_peer_choking_us(remote_id):
+            return
+
+        next_piece = self.peer_state.select_random_piece(remote_id)
+        if next_piece is None:
+            return
+
+        if not self.peer_state.reserve_request(remote_id, next_piece):
+            return
+
+        try:
+            conn.send(
+                protocol.create_message(
+                    protocol.MsgType.REQUEST,
+                    struct.pack(">I", next_piece),
+                )
+            )
+        except Exception as e:
+            print(f"[PeerNetwork] failed to send REQUEST({next_piece}) to {remote_id}: {e}")
+            self.peer_state.clear_outstanding_request(remote_id)
+
+    def _maybe_request_piece(self, remote_id: int, conn: connection.Connection):
+        assert self.peer_state is not None
+
+        if self.peer_state.is_peer_choking_us(remote_id):
+            return
+
+        piece_index = self.peer_state.select_random_piece(remote_id)
+        if piece_index is None:
+            return
+
+        if not self.peer_state.reserve_request(remote_id, piece_index):
+            return
+
+        try:
+            conn.send(
+                protocol.create_message(
+                    protocol.MsgType.REQUEST,
+                    struct.pack(">I", piece_index),
+                )
+            )
+        except Exception as e:
+            print(f"[PeerNetwork] failed to send REQUEST({piece_index}) to {remote_id}: {e}")
+            self.peer_state.clear_outstanding_request(remote_id)
+
+    def _handle_piece_received(self, remote_id: int, piece_index: int, piece_data: bytes):
+        assert self.peer_state is not None
+        assert self.file_manager is not None
+        assert self.logger is not None
+
+        outstanding = self.peer_state.get_outstanding_request(remote_id)
+        if outstanding != piece_index:
+            return
+
+        try:
+            self.file_manager.write_piece(piece_index, piece_data)
+        except Exception as e:
+            print(f"[PeerNetwork] failed writing piece {piece_index}: {e}")
+            self.peer_state.clear_outstanding_request(remote_id)
+            return
+
+        self.peer_state.clear_outstanding_request(remote_id)
+        piece_count = self.peer_state.mark_piece_downloaded(piece_index)
+        self.logger.log_downloaded_piece(piece_index, remote_id, piece_count)
+
+        self._broadcast_have(piece_index)
+
+        # Re-evaluate interest in all neighbors because this new piece may change it.
+        with self.connections_lock:
+            peer_ids = [pid for pid in self.connections.keys() if pid > 0]
+
+        for pid in peer_ids:
+            conn = self.get_connection(pid)
+            if conn is not None:
+                self._sync_interest_for_peer(pid, conn)
+
+        # Completion handling
+        if self.peer_state.has_complete_file():
+            if not self._completion_logged:
+                try:
+                    self.file_manager.assemble_file()
+                except Exception as e:
+                    print(f"[PeerNetwork] failed assembling complete file: {e}")
+                self.logger.log_completed_file()
+                self._completion_logged = True
+            return
+
+        # Request the next piece from the same peer, if possible.
+        self._request_next_piece(remote_id)
 
     def on_bytes_handler(self, conn: connection.Connection, data: bytes):
         with self.connections_lock:
@@ -240,6 +411,14 @@ class PeerNetwork:
                     if peer_id > 0:
                         self.peer_state.set_peer_choking(peer_id, False)
                         print(f"[PeerNetwork] Peer {peer_id} UNCHOKED us")
+                
+                elif msg_type == protocol.MsgType.PIECE:
+                    if len(payload) < 4:
+                        continue
+
+                    piece_index = struct.unpack(">I", payload[:4])[0]
+                    piece_data = payload[4:]
+                    self._handle_piece_received(peer_id, piece_index, piece_data)
                         
                 try:
                     self.on_bytes_received(conn, (msg_type, payload))

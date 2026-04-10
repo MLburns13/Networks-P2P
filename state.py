@@ -1,7 +1,8 @@
 import threading
 import math
+import random
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 class Bitfield:
     """
@@ -67,6 +68,9 @@ class Bitfield:
             if self.has_piece(i):
                 c += 1
         return c
+    
+    def complete(self) -> bool:
+        return self.count() == self.num_pieces
 
 @dataclass
 class NeighborState:
@@ -83,6 +87,7 @@ class PeerState:
         self.num_pieces = num_pieces
         self.my_bitfield = Bitfield(num_pieces, has_file)
         self.neighbors: Dict[int, NeighborState] = {}
+        self.requested_pieces: Set[int] = set()
         self.lock = threading.Lock()
 
     def add_neighbor(self, peer_id: int):
@@ -108,10 +113,82 @@ class PeerState:
             if peer_id in self.neighbors:
                 return self.neighbors[peer_id].bitfield.has_piece(piece_index)
             return False
+    
+    def neighbor_set_piece(self, peer_id: int, piece_index: int):
+        with self.lock:
+            if peer_id in self.neighbors:
+                self.neighbors[peer_id].bitfield.set_piece(piece_index)
 
-    def mark_piece_downloaded(self, piece_index: int):
+    def get_interesting_pieces(self, peer_id: int) -> List[int]:
+        """Returns a list of piece indices the neighbor has that we do NOT have."""
+        with self.lock:
+            if peer_id not in self.neighbors:
+                return []
+            
+            neighbor_bf = self.neighbors[peer_id].bitfield
+            
+            missing = []
+            for i in range(self.num_pieces):
+                if neighbor_bf.has_piece(i) and not self.my_bitfield.has_piece(i):
+                    missing.append(i)
+            return missing
+    
+
+    def select_random_piece(self, peer_id: int) -> Optional[int]:
+        with self.lock:
+            ns = self.neighbors.get(peer_id)
+            if ns is None:
+                return None
+
+            candidates = [
+                i
+                for i in range(self.num_pieces)
+                if ns.bitfield.has_piece(i)
+                and not self.my_bitfield.has_piece(i)
+                and i not in self.requested_pieces
+            ]
+
+            if not candidates:
+                return None
+
+            return random.choice(candidates)
+        
+    def reserve_request(self, peer_id: int, piece_index: int) -> bool:
+        with self.lock:
+            ns = self.neighbors.get(peer_id)
+            if ns is None:
+                return False
+            if ns.outstanding_request is not None:
+                return False
+            if piece_index in self.requested_pieces:
+                return False
+            ns.outstanding_request = piece_index
+            self.requested_pieces.add(piece_index)
+            return True
+
+
+    def clear_outstanding_request(self, peer_id: int):
+        with self.lock:
+            ns = self.neighbors.get(peer_id)
+            if ns is None:
+                return
+            if ns.outstanding_request is not None:
+                self.requested_pieces.discard(ns.outstanding_request)
+                ns.outstanding_request = None
+
+    def get_outstanding_request(self, peer_id: int) -> Optional[int]:
+        with self.lock:
+            ns = self.neighbors.get(peer_id)
+            return None if ns is None else ns.outstanding_request
+
+    def mark_piece_downloaded(self, piece_index: int) -> int:
         with self.lock:
             self.my_bitfield.set_piece(piece_index)
+            return self.my_bitfield.count()
+
+    def has_complete_file(self) -> bool:
+        with self.lock:
+            return self.my_bitfield.complete()
 
     def set_am_choking(self, peer_id: int, is_choking: bool):
         with self.lock:
@@ -137,17 +214,18 @@ class PeerState:
          with self.lock:
             if peer_id in self.neighbors:
                 self.neighbors[peer_id].outstanding_request = piece_index
-
-    def get_interesting_pieces(self, peer_id: int) -> List[int]:
-        """Returns a list of piece indices the neighbor has that we do NOT have."""
+                
+    def is_peer_choking_us(self, peer_id: int) -> bool:
         with self.lock:
-            if peer_id not in self.neighbors:
-                return []
-            
-            neighbor_bf = self.neighbors[peer_id].bitfield
-            
-            missing = []
-            for i in range(self.num_pieces):
-                if neighbor_bf.has_piece(i) and not self.my_bitfield.has_piece(i):
-                    missing.append(i)
-            return missing
+            ns = self.neighbors.get(peer_id)
+            return True if ns is None else ns.peer_choking
+
+    def is_peer_interested_in_us(self, peer_id: int) -> bool:
+        with self.lock:
+            ns = self.neighbors.get(peer_id)
+            return False if ns is None else ns.peer_interested
+
+    def is_am_interested_in_peer(self, peer_id: int) -> bool:
+        with self.lock:
+            ns = self.neighbors.get(peer_id)
+            return False if ns is None else ns.am_interested
