@@ -12,8 +12,11 @@
 
 ### Xuhang He
 
-- Protocol Codec + Framing 
-- State Store (Bitfields + Connection State) 
+- Protocol Codec & Message Framing
+- Thread-safe State Store (Bitfields & Connection mapping)
+- Choking/Unchoking & Interest Operations algorithms
+- System-wide Logging & Event Formatting
+- Comprehensive Unit Testing implementation
 
 # Code Introduction
 
