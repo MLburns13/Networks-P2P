@@ -27,7 +27,7 @@ class FileManager:
         self.piece_size = piece_size
         self.num_pieces = (file_size + piece_size - 1) // piece_size
 
-        self.peer_dir = Path(base_dir) / f"peer_{peer_id}"
+        self.peer_dir = Path(base_dir) / "mem" / f"peer_{peer_id}"
         self.pieces_dir = self.peer_dir / "pieces"
         self.complete_path = self.peer_dir / file_name
 

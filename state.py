@@ -88,7 +88,13 @@ class PeerState:
         self.my_bitfield = Bitfield(num_pieces, has_file)
         self.neighbors: Dict[int, NeighborState] = {}
         self.requested_pieces: Set[int] = set()
+        self.download_bytes: Dict[int, int] = {}  # peer_id -> bytes downloaded this interval
         self.lock = threading.Lock()
+        # Peers we know have finished (persists even after the connection closes)
+        self._completed_neighbor_ids: Set[int] = set()
+        if has_file:
+            # Seeder counts itself as starting with all pieces; no self-entry needed
+            pass
 
     def add_neighbor(self, peer_id: int):
         with self.lock:
@@ -101,12 +107,20 @@ class PeerState:
     def remove_neighbor(self, peer_id: int):
         with self.lock:
             if peer_id in self.neighbors:
+                # Before removing, check if this neighbor was complete so we
+                # don't lose the completion info when the connection closes.
+                ns = self.neighbors[peer_id]
+                if ns.bitfield.complete():
+                    self._completed_neighbor_ids.add(peer_id)
                 del self.neighbors[peer_id]
 
     def update_neighbor_bitfield(self, peer_id: int, bitfield_bytes: bytes):
         with self.lock:
             if peer_id in self.neighbors:
                 self.neighbors[peer_id].bitfield.from_bytes(bitfield_bytes)
+                # Eagerly record completion so it survives disconnection
+                if self.neighbors[peer_id].bitfield.complete():
+                    self._completed_neighbor_ids.add(peer_id)
 
     def neighbor_has_piece(self, peer_id: int, piece_index: int) -> bool:
         with self.lock:
@@ -118,6 +132,9 @@ class PeerState:
         with self.lock:
             if peer_id in self.neighbors:
                 self.neighbors[peer_id].bitfield.set_piece(piece_index)
+                # Eagerly record completion so it survives disconnection
+                if self.neighbors[peer_id].bitfield.complete():
+                    self._completed_neighbor_ids.add(peer_id)
 
     def get_interesting_pieces(self, peer_id: int) -> List[int]:
         """Returns a list of piece indices the neighbor has that we do NOT have."""
@@ -229,3 +246,95 @@ class PeerState:
         with self.lock:
             ns = self.neighbors.get(peer_id)
             return False if ns is None else ns.am_interested
+
+    def is_am_choking(self, peer_id: int) -> bool:
+        with self.lock:
+            ns = self.neighbors.get(peer_id)
+            return True if ns is None else ns.am_choking
+
+    # ---- download-rate tracking ----
+
+    def record_download(self, peer_id: int, num_bytes: int):
+        """Record bytes downloaded from a peer for rate calculation."""
+        with self.lock:
+            self.download_bytes[peer_id] = self.download_bytes.get(peer_id, 0) + num_bytes
+
+    def get_and_reset_download_rates(self) -> Dict[int, int]:
+        """Return accumulated byte counts per peer and reset counters."""
+        with self.lock:
+            rates = dict(self.download_bytes)
+            self.download_bytes.clear()
+            return rates
+
+    # ---- unchoking helpers ----
+
+    def get_interested_neighbors(self) -> List[int]:
+        """Return IDs of neighbors that are interested in us."""
+        with self.lock:
+            return [pid for pid, ns in self.neighbors.items() if ns.peer_interested]
+
+    def get_choked_interested_neighbors(self, exclude: Optional[Set[int]] = None) -> List[int]:
+        """Return neighbor IDs that we are choking AND that are interested in us."""
+        with self.lock:
+            return [
+                pid for pid, ns in self.neighbors.items()
+                if ns.am_choking and ns.peer_interested
+                and (exclude is None or pid not in exclude)
+            ]
+
+    def get_neighbor_ids(self) -> List[int]:
+        with self.lock:
+            return list(self.neighbors.keys())
+
+    def all_neighbors_complete(self, expected_count: int = 0) -> bool:
+        """Returns True when every peer in the swarm that we've ever tracked is done.
+
+        A peer is considered done if:
+        - Its current bitfield is complete (still connected), OR
+        - It was seen complete before its connection was closed.
+
+        We don't require expected_count active connections to exist anymore;
+        instead we check that the union of currently-complete + historically-complete
+        covers at least expected_count distinct peers.
+        """
+        with self.lock:
+            # Peers that are currently connected and done
+            currently_complete = {
+                pid for pid, ns in self.neighbors.items() if ns.bitfield.complete()
+            }
+            # Union with peers that completed before disconnecting
+            all_seen_complete = currently_complete | self._completed_neighbor_ids
+            return len(all_seen_complete) >= expected_count
+
+
+    # ---- alias used by older tests ----
+
+    def select_random_interesting_piece(self, peer_id: int) -> Optional[int]:
+        """Alias for select_random_piece (for backward compat with tests)."""
+        return self.select_random_piece(peer_id)
+
+    def get_interesting_pieces_for(self, peer_id: int) -> List[int]:
+        """Return piece indices we have that the given neighbor does NOT have.
+        Used to describe what they would gain by downloading from us."""
+        with self.lock:
+            ns = self.neighbors.get(peer_id)
+            if ns is None:
+                return []
+            result = []
+            for i in range(self.my_bitfield.num_pieces):
+                if self.my_bitfield.has_piece(i) and not ns.bitfield.has_piece(i):
+                    result.append(i)
+            return result
+
+    def get_neighbor_piece_count(self, peer_id: int) -> int:
+        """Return how many pieces the given neighbor currently has."""
+        with self.lock:
+            ns = self.neighbors.get(peer_id)
+            if ns is None:
+                return 0
+            return sum(1 for i in range(ns.bitfield.num_pieces) if ns.bitfield.has_piece(i))
+
+    def has_piece(self, piece_index: int) -> bool:
+        """Return True if we locally own piece_index."""
+        with self.lock:
+            return self.my_bitfield.has_piece(piece_index)

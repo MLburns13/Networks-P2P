@@ -32,6 +32,7 @@ class Connection:
 
     def _recv_loop(self):
         try:
+            print(f"[Connection:{self.name}] Timeout before recv is {self.sock.gettimeout()}")
             while self.running:
                 data = self.sock.recv(4096)
                 if not data:

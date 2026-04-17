@@ -39,7 +39,7 @@ def parse_common_cfg(path: str = os.path.join("cfg", "Common.cfg")) -> Dict[str,
             except ValueError as e:
                 raise ValueError(f"{path}:{lineno}: invalid line: {e}")
 
-            if key.lower() in ("filesize", "piecesize", "unchokinginterval", "optimisticunchokinginterval"):
+            if key.lower() in ("filesize", "piecesize", "unchokinginterval", "optimisticunchokinginterval", "numberofpreferredneighbors"):
                 try:
                     props[key] = int(val)
                 except ValueError:

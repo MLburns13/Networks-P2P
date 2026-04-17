@@ -6,7 +6,8 @@ from typing import Iterable
 class PeerLogger:
     def __init__(self, peer_id: int, base_dir: str = "."):
         self.peer_id = peer_id
-        self.path = Path(base_dir) / f"log_peer_{peer_id}.log"
+        self.path = Path(base_dir) / "logs" / f"log_peer_{peer_id}.log"
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self._fh = self.path.open("a", encoding="utf-8", buffering=1)
 
@@ -46,18 +47,24 @@ class PeerLogger:
     def log_choked_by(self, remote_id: int) -> None:
         self.log(f"Peer {self.peer_id} is choked by Peer {remote_id}.")
 
-    def log_received_have(self, remote_id: int, piece_index: int) -> None:
+    def log_received_have(self, remote_id: int, piece_index: int, needed: bool) -> None:
+        status = "(needed)" if needed else "(already have it)"
         self.log(
             f"Peer {self.peer_id} received the 'have' message from Peer {remote_id} "
-            f"for the piece {piece_index}."
+            f"for piece {piece_index} {status}."
         )
 
-    def log_received_interested(self, remote_id: int) -> None:
-        self.log(f"Peer {self.peer_id} received the 'interested' message from Peer {remote_id}.")
-
-    def log_received_not_interested(self, remote_id: int) -> None:
+    def log_received_interested(self, remote_id: int, wanted_pieces: list) -> None:
+        pieces_str = ",".join(str(p) for p in sorted(wanted_pieces))
         self.log(
-            f"Peer {self.peer_id} received the 'not interested' message from Peer {remote_id}."
+            f"Peer {self.peer_id} received the 'interested' message from Peer {remote_id} "
+            f"(wants our pieces: [{pieces_str}])."
+        )
+
+    def log_received_not_interested(self, remote_id: int, remote_piece_count: int) -> None:
+        self.log(
+            f"Peer {self.peer_id} received the 'not interested' message from Peer {remote_id} "
+            f"(Peer {remote_id} now has {remote_piece_count} pieces)."
         )
 
     def log_downloaded_piece(self, piece_index: int, remote_id: int, num_pieces: int) -> None:

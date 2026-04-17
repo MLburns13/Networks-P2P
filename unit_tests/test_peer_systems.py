@@ -118,7 +118,7 @@ class TestLogger(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             logger = PeerLogger(1001, base_dir=td)
             logger.log_connection_made(1002)
-            logger.log_received_have(1002, 3)
+            logger.log_received_have(1002, 3, needed=True)
             logger.log_completed_file()
             logger.close()
 

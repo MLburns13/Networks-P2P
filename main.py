@@ -1,4 +1,5 @@
 import sys
+import os
 import time
 import config_loader
 import peer_network
@@ -18,10 +19,21 @@ pn = peer_network.PeerNetwork(my_id, peers, on_bytes_received=peer_network.demo_
                                 bind_host="0.0.0.0")
 try:
     pn.start()
-    print("[main] PeerNetwork started. Press Ctrl-C to stop.")
-    while True:
-        time.sleep(1)
+    print("[main] PeerNetwork started. Waiting for all peers to complete ...")
+    # Block until all peers have the complete file, or Ctrl-C
+    while not pn.all_done.wait(timeout=1.0):
+        pass
+    print("[main] All peers have the complete file. Shutting down.")
+    # Wait briefly before tearing down sockets so our final HAVE messages
+    # have time to be flushed to the OS and delivered to our neighbors.
+    # Otherwise os._exit(0) might cause TCP RST and drop outbound buffers.
+    time.sleep(15.0)
+
 except KeyboardInterrupt:
     print("Interrupted, shutting down...")
 finally:
     pn.stop()
+
+# Force immediate exit to prevent daemon threads from blocking interpreter shutdown
+# and causing Fatal Python errors due to _io.BufferedWriter lock contention on stdout.
+os._exit(0)

@@ -1,7 +1,7 @@
 import socket
 import threading
 import time
-from typing import List, Callable, Optional, Dict
+from typing import List, Callable, Optional, Dict, Set
 import config_loader
 import connection
 import protocol
@@ -30,14 +30,23 @@ class PeerNetwork:
         self.server_sock = None
         self.server_thread = None
         self.running = False
-        self.outgoing_retry_interval = 1.0
-        self.outgoing_retry_attempts = 10
+        self.outgoing_retry_interval = 0.5   # initial backoff (doubles each attempt, capped at 5s)
+        self.outgoing_retry_attempts = 60     # enough for large networks under load
         
         self.my_index = -1
         self.common = {}
         self.file_manager: Optional[FileManager] = None
         self.logger: Optional[PeerLogger] = None
         self._completion_logged = False
+
+        # Unchoking state
+        self._preferred_ids: Set[int] = set()
+        self._optimistic_id: Optional[int] = None
+        self._unchoking_thread: Optional[threading.Thread] = None
+        self._optimistic_thread: Optional[threading.Thread] = None
+
+        # Termination event – set when all peers have the complete file
+        self.all_done = threading.Event()
 
     def start(self):
         my_entry = None
@@ -66,10 +75,16 @@ class PeerNetwork:
         )
         self.logger = PeerLogger(self.my_peer_id, base_dir=".")
 
+        # If we start with the complete file, mark completion immediately
+        if my_entry.has_file:
+            self._completion_logged = True
+
         self.server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.server_sock.bind((self.bind_host, my_entry.port))
-        self.server_sock.listen(50)
+        # Backlog scaled to network size so the OS queue doesn't fill under burst load
+        listen_backlog = max(128, len(self.peers))
+        self.server_sock.listen(listen_backlog)
 
         self.running = True
         self.server_thread = threading.Thread(target=self._accept_loop, daemon=True, name="accept-loop")
@@ -78,6 +93,128 @@ class PeerNetwork:
 
         #connect to all prior peers in the file ordering
         threading.Thread(target=self._connect_to_previous_peers, daemon=True).start()
+
+        # Start unchoking timer threads
+        self._unchoking_thread = threading.Thread(target=self._unchoking_timer_loop, daemon=True, name="unchoke-timer")
+        self._unchoking_thread.start()
+
+        self._optimistic_thread = threading.Thread(target=self._optimistic_timer_loop, daemon=True, name="opt-unchoke-timer")
+        self._optimistic_thread.start()
+
+    # ----------------------------------------------------------------
+    # Unchoking timer loops  (Missing component #1)
+    # ----------------------------------------------------------------
+
+    def _unchoking_timer_loop(self):
+        """Every UnchokingInterval seconds, reselect preferred neighbors."""
+        interval = int(self.common.get("UnchokingInterval", 5))
+        while self.running:
+            time.sleep(interval)
+            if not self.running:
+                break
+            try:
+                self._select_preferred_neighbors()
+            except Exception as e:
+                print(f"[PeerNetwork] unchoking timer error: {e}")
+
+    def _optimistic_timer_loop(self):
+        """Every OptimisticUnchokingInterval seconds, pick an optimistic neighbor."""
+        interval = int(self.common.get("OptimisticUnchokingInterval", 15))
+        while self.running:
+            time.sleep(interval)
+            if not self.running:
+                break
+            try:
+                self._select_optimistic_neighbor()
+            except Exception as e:
+                print(f"[PeerNetwork] optimistic timer error: {e}")
+
+    def _select_preferred_neighbors(self):
+        """Determine top-k preferred neighbors based on download rate (or random if we have the complete file)."""
+        assert self.peer_state is not None
+        assert self.logger is not None
+
+        k = int(self.common.get("NumberOfPreferredNeighbors", 2))
+        rates = self.peer_state.get_and_reset_download_rates()
+        interested = self.peer_state.get_interested_neighbors()
+
+        if self.peer_state.has_complete_file():
+            # If we have the full file, pick k random interested neighbors
+            selected = random.sample(interested, min(k, len(interested)))
+        else:
+            # Sort by download rate: highest first, break ties randomly
+            random.shuffle(interested)  # randomise order before stable sort for tie-breaking
+            interested.sort(key=lambda pid: rates.get(pid, 0), reverse=True)
+            selected = interested[:k]
+
+        selected_set = set(selected)
+        self._preferred_ids = selected_set
+
+        # Log preferred neighbors
+        self.logger.log_preferred_neighbors(sorted(selected_set))
+
+        # Unchoke selected, choke everyone else (except optimistic neighbor)
+        with self.connections_lock:
+            all_pids = [pid for pid in self.connections if pid > 0]
+
+        for pid in all_pids:
+            conn = self.get_connection(pid)
+            if conn is None:
+                continue
+            if pid in selected_set:
+                if self.peer_state.is_am_choking(pid):
+                    self.peer_state.set_am_choking(pid, False)
+                    try:
+                        conn.send(protocol.create_message(protocol.MsgType.UNCHOKE))
+                    except Exception as e:
+                        print(f"[PeerNetwork] failed to send UNCHOKE to {pid}: {e}")
+            else:
+                if pid == self._optimistic_id:
+                    continue  # don't choke the optimistic neighbor
+                if not self.peer_state.is_am_choking(pid):
+                    self.peer_state.set_am_choking(pid, True)
+                    try:
+                        conn.send(protocol.create_message(protocol.MsgType.CHOKE))
+                    except Exception as e:
+                        print(f"[PeerNetwork] failed to send CHOKE to {pid}: {e}")
+
+    def _select_optimistic_neighbor(self):
+        """Pick a random choked-but-interested neighbor to optimistically unchoke."""
+        assert self.peer_state is not None
+        assert self.logger is not None
+
+        candidates = self.peer_state.get_choked_interested_neighbors(exclude=self._preferred_ids)
+        if not candidates:
+            return
+
+        chosen = random.choice(candidates)
+
+        # If we had a previous optimistic neighbor that isn't a preferred neighbor, re-choke it
+        old = self._optimistic_id
+        if old is not None and old != chosen and old not in self._preferred_ids:
+            if not self.peer_state.is_am_choking(old):
+                self.peer_state.set_am_choking(old, True)
+                conn = self.get_connection(old)
+                if conn is not None:
+                    try:
+                        conn.send(protocol.create_message(protocol.MsgType.CHOKE))
+                    except Exception as e:
+                        print(f"[PeerNetwork] failed to choke old optimistic {old}: {e}")
+
+        self._optimistic_id = chosen
+        self.peer_state.set_am_choking(chosen, False)
+        conn = self.get_connection(chosen)
+        if conn is not None:
+            try:
+                conn.send(protocol.create_message(protocol.MsgType.UNCHOKE))
+            except Exception as e:
+                print(f"[PeerNetwork] failed to send UNCHOKE to optimistic {chosen}: {e}")
+
+        self.logger.log_optimistic_neighbor(chosen)
+
+    # ----------------------------------------------------------------
+    # Connection accept / outgoing
+    # ----------------------------------------------------------------
 
     def _accept_loop(self):
         while self.running:
@@ -94,13 +231,15 @@ class PeerNetwork:
                     self.connections[tmp_id] = conn
                     self.framers[tmp_id] = protocol.MessageFramer()
                     
-                conn.start()
-                    
-                # Send our handshake right away
+                # Send our handshake right away before starting recv loop 
+                # to prevent race conditions where we reply to their handshake 
+                # before we send our own!
                 try:
                     conn.send(protocol.create_handshake(self.my_peer_id))
                 except Exception as e:
                     print(f"[PeerNetwork] Error sending handshake: {e}")
+                    
+                conn.start()
                 
                 if self.on_connection_received:
                     tmp_peer = config_loader.PeerInfo(peer_id=-1, host=addr[0], port=addr[1], has_file=False)
@@ -119,6 +258,12 @@ class PeerNetwork:
         #connect to peers that are earlier in the peerinfo ordering (index < my_index)
         for i in range(0, self.my_index):
             peer_to = self.peers[i]
+            
+            with self.connections_lock:
+                if peer_to.peer_id in self.connections:
+                    print(f"[PeerNetwork] Already connected to {peer_to.peer_id}, skipping outgoing connection.")
+                    continue
+
             attempt = 0
             connected = False
             
@@ -126,21 +271,32 @@ class PeerNetwork:
                 attempt += 1
                 try:
                     sock = socket.create_connection((peer_to.host, peer_to.port), timeout=5)
+                    sock.settimeout(None)
                     conn = connection.Connection(sock, (peer_to.host, peer_to.port), on_bytes=self.on_bytes_handler, on_close=self.on_conn_close_handler, name=f"out-{peer_to.peer_id}")
                     
                     with self.connections_lock:
+                        if peer_to.peer_id in self.connections:
+                            print(f"[PeerNetwork] Connection arrived while connecting to {peer_to.peer_id}, aborting outgoing.")
+                            conn.close()
+                            connected = True # Handled by incoming
+                            continue
+                            
                         self.connections[peer_to.peer_id] = conn
                         self.framers[peer_to.peer_id] = protocol.MessageFramer()
                     
-                    conn.start()
-                        
-                    # Send our handshake right away
+                    # Send our handshake right away before starting recv loop
                     try:
                         conn.send(protocol.create_handshake(self.my_peer_id))
                     except Exception as e:
                         print(f"[PeerNetwork] Error sending handshake: {e}")
                         
+                    conn.start()
+                        
                     print(f"[PeerNetwork] Outgoing connection established to {peer_to.peer_id}@{peer_to.host}:{peer_to.port}")
+
+                    # Log the outgoing connection
+                    if self.logger:
+                        self.logger.log_connection_made(peer_to.peer_id)
                     
                     if self.on_connection_made:
                         try:
@@ -151,7 +307,9 @@ class PeerNetwork:
                     connected = True
                 except Exception as e:
                     print(f"[PeerNetwork] Could not connect to {peer_to.peer_id}@{peer_to.host}:{peer_to.port} (attempt {attempt}): {e}")
-                    time.sleep(self.outgoing_retry_interval)
+                    # Exponential backoff: 0.5s, 1s, 2s, 4s … capped at 5s
+                    backoff = min(self.outgoing_retry_interval * (2 ** (attempt - 1)), 5.0)
+                    time.sleep(backoff)
                     
             if not connected:
                 print(f"[PeerNetwork] FAILED to connect to {peer_to.peer_id} after {self.outgoing_retry_attempts} attempts")
@@ -173,6 +331,10 @@ class PeerNetwork:
                 del self.connections[old_id]
             if old_id in self.framers:
                 del self.framers[old_id]
+
+    # ----------------------------------------------------------------
+    # Interest / request helpers
+    # ----------------------------------------------------------------
 
     def _sync_interest_for_peer(self, remote_id: int, conn: connection.Connection):
         assert self.peer_state is not None
@@ -276,6 +438,10 @@ class PeerNetwork:
             return
 
         self.peer_state.clear_outstanding_request(remote_id)
+
+        # Track download rate (Missing component #1 – rate tracking)
+        self.peer_state.record_download(remote_id, len(piece_data))
+
         piece_count = self.peer_state.mark_piece_downloaded(piece_index)
         self.logger.log_downloaded_piece(piece_index, remote_id, piece_count)
 
@@ -299,10 +465,35 @@ class PeerNetwork:
                     print(f"[PeerNetwork] failed assembling complete file: {e}")
                 self.logger.log_completed_file()
                 self._completion_logged = True
+
+            # Check global termination (Missing component #5)
+            self._check_termination()
+            # Don't request more pieces, but keep processing messages
             return
 
         # Request the next piece from the same peer, if possible.
         self._request_next_piece(remote_id)
+
+    # ----------------------------------------------------------------
+    # Global termination check  (Missing component #5)
+    # ----------------------------------------------------------------
+
+    def _check_termination(self):
+        """Signal all_done when we have the complete file AND every neighbor does too."""
+        assert self.peer_state is not None
+        if not self._completion_logged:
+            return  # our own file must be assembled first
+        if not self.peer_state.has_complete_file():
+            return
+        expected_neighbors = len(self.peers) - 1
+        if self.peer_state.all_neighbors_complete(expected_neighbors):
+            print(f"[PeerNetwork:{self.my_peer_id}] All {len(self.peers)} peers have the complete file – signalling termination.")
+            self.all_done.set()
+
+
+    # ----------------------------------------------------------------
+    # Main message handler
+    # ----------------------------------------------------------------
 
     def on_bytes_handler(self, conn: connection.Connection, data: bytes):
         with self.connections_lock:
@@ -350,6 +541,13 @@ class PeerNetwork:
                         del self.connections[peer_id]
                         del self.framers[peer_id]
 
+                    # Log incoming connection (Missing component #6)
+                    if self.logger:
+                        self.logger.log_connected_from(remote_id)
+
+                # Update peer_id for subsequent message processing in this call
+                peer_id = remote_id
+
                 # Handshake finished, add to peer state
                 self.peer_state.add_neighbor(remote_id)
                 
@@ -371,7 +569,9 @@ class PeerNetwork:
                     
                 print(f"[PeerNetwork] Received message type {msg_type} payload {len(payload)}b from {conn.name}")
                 
-                # Check for state-related messages
+                # --------------------------------------------------------
+                # BITFIELD
+                # --------------------------------------------------------
                 if msg_type == protocol.MsgType.BITFIELD:
                     remote_id = peer_id if peer_id > 0 else None
                     if remote_id:
@@ -389,29 +589,97 @@ class PeerNetwork:
                                 self.peer_state.set_am_interested(remote_id, False)
                                 conn.send(protocol.create_message(protocol.MsgType.NOT_INTERESTED))
                                 print(f"[PeerNetwork] Sent NOT_INTERESTED to {remote_id}")
+                            
+                            # A received bitfield might complete this neighbor's state
+                            self._check_termination()
                         except Exception as e:
                             print(f"[PeerNetwork] Error processing BITFIELD: {e}")
                             
+                # --------------------------------------------------------
+                # INTERESTED  (Missing component #6 – logging)
+                # --------------------------------------------------------
                 elif msg_type == protocol.MsgType.INTERESTED:
                     if peer_id > 0:
                         self.peer_state.set_peer_interested(peer_id, True)
+                        if self.logger:
+                            # Pieces they want = pieces we have that they don't
+                            wanted = self.peer_state.get_interesting_pieces_for(peer_id)
+                            self.logger.log_received_interested(peer_id, wanted)
                         print(f"[PeerNetwork] Peer {peer_id} is INTERESTED in us")
                         
+                # --------------------------------------------------------
+                # NOT_INTERESTED  (Missing component #6 – logging)
+                # --------------------------------------------------------
                 elif msg_type == protocol.MsgType.NOT_INTERESTED:
                     if peer_id > 0:
                         self.peer_state.set_peer_interested(peer_id, False)
+                        if self.logger:
+                            piece_count = self.peer_state.get_neighbor_piece_count(peer_id)
+                            self.logger.log_received_not_interested(peer_id, piece_count)
                         print(f"[PeerNetwork] Peer {peer_id} is NOT_INTERESTED in us")
                         
+                # --------------------------------------------------------
+                # CHOKE  (Missing component #4 – clear outstanding request)
+                # --------------------------------------------------------
                 elif msg_type == protocol.MsgType.CHOKE:
                     if peer_id > 0:
                         self.peer_state.set_peer_choking(peer_id, True)
+                        # Clear any outstanding request from this peer since
+                        # we won't be receiving that piece.
+                        self.peer_state.clear_outstanding_request(peer_id)
+                        if self.logger:
+                            self.logger.log_choked_by(peer_id)
                         print(f"[PeerNetwork] Peer {peer_id} CHOKED us")
                         
+                # --------------------------------------------------------
+                # UNCHOKE  (Missing component #4 – trigger piece request)
+                # --------------------------------------------------------
                 elif msg_type == protocol.MsgType.UNCHOKE:
                     if peer_id > 0:
                         self.peer_state.set_peer_choking(peer_id, False)
+                        if self.logger:
+                            self.logger.log_unchoked_by(peer_id)
                         print(f"[PeerNetwork] Peer {peer_id} UNCHOKED us")
-                
+                        # Immediately try to request a piece from this peer
+                        self._maybe_request_piece(peer_id, conn)
+
+                # --------------------------------------------------------
+                # HAVE  (Missing component #2)
+                # --------------------------------------------------------
+                elif msg_type == protocol.MsgType.HAVE:
+                    if peer_id > 0 and len(payload) >= 4:
+                        piece_index = struct.unpack(">I", payload[:4])[0]
+                        needed = not self.peer_state.has_piece(piece_index)
+                        self.peer_state.neighbor_set_piece(peer_id, piece_index)
+                        if self.logger:
+                            self.logger.log_received_have(peer_id, piece_index, needed)
+                        print(f"[PeerNetwork] Peer {peer_id} has piece {piece_index}")
+                        # Re-evaluate interest
+                        self._sync_interest_for_peer(peer_id, conn)
+                        # Check termination – the neighbor just got a new piece
+                        self._check_termination()
+
+                # --------------------------------------------------------
+                # REQUEST  (Missing component #3)
+                # --------------------------------------------------------
+                elif msg_type == protocol.MsgType.REQUEST:
+                    if peer_id > 0 and len(payload) >= 4:
+                        piece_index = struct.unpack(">I", payload[:4])[0]
+                        # Only serve pieces if we have unchoked this peer
+                        if not self.peer_state.is_am_choking(peer_id):
+                            try:
+                                piece_data = self.file_manager.read_piece(piece_index)
+                                piece_payload = struct.pack(">I", piece_index) + piece_data
+                                conn.send(protocol.create_message(protocol.MsgType.PIECE, piece_payload))
+                                print(f"[PeerNetwork] Sent PIECE {piece_index} to {peer_id}")
+                            except Exception as e:
+                                print(f"[PeerNetwork] failed to serve piece {piece_index} to {peer_id}: {e}")
+                        else:
+                            print(f"[PeerNetwork] Ignoring REQUEST from choked peer {peer_id}")
+
+                # --------------------------------------------------------
+                # PIECE
+                # --------------------------------------------------------
                 elif msg_type == protocol.MsgType.PIECE:
                     if len(payload) < 4:
                         continue
@@ -454,6 +722,8 @@ class PeerNetwork:
                 except:
                     pass
             self.connections.clear()
+        if self.logger:
+            self.logger.close()
         print("[PeerNetwork] stopped")
 
 #demo stuff
