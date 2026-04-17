@@ -6,6 +6,9 @@
 
 - Config & Peer info loaders
 - Networking Core (Server + Outgoing Connections)
+- HAVE / REQUEST / PIECE message systems
+- File piece manager
+- Piece selection logic
 
 ### Xuhang He
 
@@ -19,6 +22,9 @@
 - peer_network.py: Handles networks of connections with multiple peers, sending messages between them, and reconnecting/stopping connections
 - protocol.py: Contains the MessageFramer which safely buffers real-time raw TCP streams into complete structured messages and unpacks the 32-byte Handshake.
 - state.py: Thread-safe state store containing Bitfield structures and tracks piece inventory and choke/interest status for the local peer and all active neighbors.
+- file_manager.py: Handles reading and writing file pieces, as well as checking read and writes to confirm progress. Stores pieces in mem/peer_{id}/piece/
+- logger.py: Contains formatting for logging messages to confirm progress to user
+- main.py: Entry point, used from command line to read peer id, initialize peer loader, and activate parsing of config files
 
 # P2P Project Walkthrough
 
