@@ -100,6 +100,19 @@ class PeerNetwork:
 
         self._optimistic_thread = threading.Thread(target=self._optimistic_timer_loop, daemon=True, name="opt-unchoke-timer")
         self._optimistic_thread.start()
+        
+        print(f"\n{'='*60}")
+        print(f"[STARTUP] Peer {self.my_peer_id} starting")
+        print(f"  FileName              : {file_name}")
+        print(f"  FileSize              : {file_size} bytes")
+        print(f"  PieceSize             : {piece_size} bytes")
+        print(f"  NumPieces             : {num_pieces}")
+        print(f"  NumberOfPreferredNeighbors : {self.common.get('NumberOfPreferredNeighbors')}")
+        print(f"  UnchokingInterval     : {self.common.get('UnchokingInterval')} s")
+        print(f"  OptimisticUnchokingInterval: {self.common.get('OptimisticUnchokingInterval')} s")
+        print(f"  Has file at start     : {my_entry.has_file}")
+        print(f"  Initial bitfield      : {self.peer_state.my_bitfield.count()}/{num_pieces} pieces")
+        print(f"{'='*60}\n")
 
     # ----------------------------------------------------------------
     # Unchoking timer loops  (Missing component #1)
@@ -133,6 +146,8 @@ class PeerNetwork:
         """Determine top-k preferred neighbors based on download rate (or random if we have the complete file)."""
         assert self.peer_state is not None
         assert self.logger is not None
+        
+        print(f"\n[UNCHOKE-TIMER] Peer {self.my_peer_id}: reselecting preferred neighbors (interval={self.common.get('UnchokingInterval')}s) ...")
 
         k = int(self.common.get("NumberOfPreferredNeighbors", 2))
         rates = self.peer_state.get_and_reset_download_rates()
@@ -166,6 +181,7 @@ class PeerNetwork:
                     self.peer_state.set_am_choking(pid, False)
                     try:
                         conn.send(protocol.create_message(protocol.MsgType.UNCHOKE))
+                        print(f"[UNCHOKE-TIMER] Sent UNCHOKE to preferred neighbor {pid}")
                     except Exception as e:
                         print(f"[PeerNetwork] failed to send UNCHOKE to {pid}: {e}")
             else:
@@ -175,6 +191,7 @@ class PeerNetwork:
                     self.peer_state.set_am_choking(pid, True)
                     try:
                         conn.send(protocol.create_message(protocol.MsgType.CHOKE))
+                        print(f"[UNCHOKE-TIMER] Sent CHOKE to {pid} (no longer preferred)")
                     except Exception as e:
                         print(f"[PeerNetwork] failed to send CHOKE to {pid}: {e}")
 
@@ -182,6 +199,8 @@ class PeerNetwork:
         """Pick a random choked-but-interested neighbor to optimistically unchoke."""
         assert self.peer_state is not None
         assert self.logger is not None
+        
+        print(f"\n[OPT-UNCHOKE-TIMER] Peer {self.my_peer_id}: reselecting optimistic neighbor (interval={self.common.get('OptimisticUnchokingInterval')}s) ...")
 
         candidates = self.peer_state.get_choked_interested_neighbors(exclude=self._preferred_ids)
         if not candidates:
@@ -198,6 +217,7 @@ class PeerNetwork:
                 if conn is not None:
                     try:
                         conn.send(protocol.create_message(protocol.MsgType.CHOKE))
+                        print(f"[OPT-UNCHOKE-TIMER] Sent CHOKE to previous optimistic neighbor {old}")
                     except Exception as e:
                         print(f"[PeerNetwork] failed to choke old optimistic {old}: {e}")
 
@@ -207,6 +227,7 @@ class PeerNetwork:
         if conn is not None:
             try:
                 conn.send(protocol.create_message(protocol.MsgType.UNCHOKE))
+                print(f"[OPT-UNCHOKE-TIMER] Sent UNCHOKE to optimistic neighbor {chosen}")
             except Exception as e:
                 print(f"[PeerNetwork] failed to send UNCHOKE to optimistic {chosen}: {e}")
 
@@ -347,12 +368,14 @@ class PeerNetwork:
             self.peer_state.set_am_interested(remote_id, True)
             try:
                 conn.send(protocol.create_message(protocol.MsgType.INTERESTED))
+                print(f"[INTERESTED] Peer {self.my_peer_id} sent INTERESTED to {remote_id}")
             except Exception as e:
                 print(f"[PeerNetwork] failed to send INTERESTED to {remote_id}: {e}")
         elif not interested and current:
             self.peer_state.set_am_interested(remote_id, False)
             try:
                 conn.send(protocol.create_message(protocol.MsgType.NOT_INTERESTED))
+                print(f"[NOT-INTERESTED] Peer {self.my_peer_id} sent NOT_INTERESTED to {remote_id}")
             except Exception as e:
                 print(f"[PeerNetwork] failed to send NOT_INTERESTED to {remote_id}: {e}")
 
@@ -393,6 +416,7 @@ class PeerNetwork:
                     struct.pack(">I", next_piece),
                 )
             )
+            print(f"[REQUEST] Peer {self.my_peer_id} sent REQUEST for piece {next_piece} to {remote_id}")
         except Exception as e:
             print(f"[PeerNetwork] failed to send REQUEST({next_piece}) to {remote_id}: {e}")
             self.peer_state.clear_outstanding_request(remote_id)
@@ -417,6 +441,7 @@ class PeerNetwork:
                     struct.pack(">I", piece_index),
                 )
             )
+            print(f"[REQUEST] Peer {self.my_peer_id} sent REQUEST for piece {piece_index} to {remote_id}")
         except Exception as e:
             print(f"[PeerNetwork] failed to send REQUEST({piece_index}) to {remote_id}: {e}")
             self.peer_state.clear_outstanding_request(remote_id)
