@@ -194,30 +194,6 @@ class PeerNetwork:
                         print(f"[UNCHOKE-TIMER] Sent CHOKE to {pid} (no longer preferred)")
                     except Exception as e:
                         print(f"[PeerNetwork] failed to send CHOKE to {pid}: {e}")
-        
-        self._restart_stalled_requests()
-                        
-    def _restart_stalled_requests(self):
-        """For every peer we're unchoked by and interested in, ensure there
-        is an outstanding request. Recovers from any stalled download loop."""
-        assert self.peer_state is not None
-        with self.connections_lock:
-            peer_ids = [pid for pid in self.connections if pid > 0]
-
-        for pid in peer_ids:
-            if (not self.peer_state.is_peer_choking_us(pid)
-                    and self.peer_state.is_am_interested_in_peer(pid)):
-                
-                outstanding = self.peer_state.get_outstanding_request(pid)
-                if outstanding is None:
-                    # No outstanding request - try to make one
-                    conn = self.get_connection(pid)
-                    if conn is not None:
-                        print(f"[WATCHDOG] Restarting stalled request loop with peer {pid}")
-                        self._maybe_request_piece(pid, conn)
-                else:
-                    # There's an outstanding request - this is expected
-                    pass
 
     def _select_optimistic_neighbor(self):
         """Pick a random choked-but-interested neighbor to optimistically unchoke."""
@@ -551,11 +527,6 @@ class PeerNetwork:
         # so we're ready to request again. This ensures we don't get stuck waiting for
         # a piece that may not arrive (e.g., due to out-of-order delivery).
         self._request_next_piece(remote_id)
-        
-        # CRITICAL: Ensure we have requests from ALL unchoked, interested peers.
-        # If this peer exhausted their pieces or `select_random_piece` returned None,
-        # we might be stuck. Check the watchdog to restart any stalled requests.
-        self._restart_stalled_requests()
 
     # ----------------------------------------------------------------
     # Global termination check  (Missing component #5)
