@@ -206,12 +206,18 @@ class PeerNetwork:
 
         for pid in peer_ids:
             if (not self.peer_state.is_peer_choking_us(pid)
-                    and self.peer_state.is_am_interested_in_peer(pid)
-                    and self.peer_state.get_outstanding_request(pid) is None):
-                conn = self.get_connection(pid)
-                if conn is not None:
-                    print(f"[WATCHDOG] Restarting stalled request loop with peer {pid}")
-                    self._maybe_request_piece(pid, conn)
+                    and self.peer_state.is_am_interested_in_peer(pid)):
+                
+                outstanding = self.peer_state.get_outstanding_request(pid)
+                if outstanding is None:
+                    # No outstanding request - try to make one
+                    conn = self.get_connection(pid)
+                    if conn is not None:
+                        print(f"[WATCHDOG] Restarting stalled request loop with peer {pid}")
+                        self._maybe_request_piece(pid, conn)
+                else:
+                    # There's an outstanding request - this is expected
+                    pass
 
     def _select_optimistic_neighbor(self):
         """Pick a random choked-but-interested neighbor to optimistically unchoke."""
@@ -424,9 +430,15 @@ class PeerNetwork:
 
         next_piece = self.peer_state.select_random_piece(remote_id)
         if next_piece is None:
+            # No available pieces from this peer - could indicate:
+            # 1. They don't have any pieces we need
+            # 2. All their interesting pieces are already requested
+            # 3. We already have all pieces they have
+            print(f"[REQUEST] Peer {self.my_peer_id} has no available pieces to request from {remote_id}")
             return
 
         if not self.peer_state.reserve_request(remote_id, next_piece):
+            print(f"[REQUEST] Failed to reserve piece {next_piece} from {remote_id} (already requested?)")
             return
 
         try:
@@ -527,6 +539,11 @@ class PeerNetwork:
         # so we're ready to request again. This ensures we don't get stuck waiting for
         # a piece that may not arrive (e.g., due to out-of-order delivery).
         self._request_next_piece(remote_id)
+        
+        # CRITICAL: Ensure we have requests from ALL unchoked, interested peers.
+        # If this peer exhausted their pieces or `select_random_piece` returned None,
+        # we might be stuck. Check the watchdog to restart any stalled requests.
+        self._restart_stalled_requests()
 
     # ----------------------------------------------------------------
     # Global termination check  (Missing component #5)
