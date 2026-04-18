@@ -42,35 +42,31 @@ class PeerLogger:
         )
 
     def log_unchoked_by(self, remote_id: int) -> None:
-        self.log(f"Peer {self.peer_id} is unchoked by Peer {remote_id}.")
+        self.log(f"Peer {self.peer_id} is unchoked by {remote_id}.")
 
     def log_choked_by(self, remote_id: int) -> None:
-        self.log(f"Peer {self.peer_id} is choked by Peer {remote_id}.")
+        self.log(f"Peer {self.peer_id} is choked by {remote_id}.")
 
-    def log_received_have(self, remote_id: int, piece_index: int, needed: bool) -> None:
-        status = "(needed)" if needed else "(already have it)"
+    def log_received_have(self, remote_id: int, piece_index: int) -> None:
         self.log(
-            f"Peer {self.peer_id} received the 'have' message from Peer {remote_id} "
-            f"for piece {piece_index} {status}."
+            f"Peer {self.peer_id} received the 'have' message from "
+            f"{remote_id} for the piece {piece_index}."
         )
 
-    def log_received_interested(self, remote_id: int, wanted_pieces: list) -> None:
-        pieces_str = ",".join(str(p) for p in sorted(wanted_pieces))
+    def log_received_interested(self, remote_id: int) -> None:
         self.log(
-            f"Peer {self.peer_id} received the 'interested' message from Peer {remote_id} "
-            f"(wants our pieces: [{pieces_str}])."
+            f"Peer {self.peer_id} received the 'interested' message from {remote_id}."
         )
 
-    def log_received_not_interested(self, remote_id: int, remote_piece_count: int) -> None:
+    def log_received_not_interested(self, remote_id: int) -> None:
         self.log(
-            f"Peer {self.peer_id} received the 'not interested' message from Peer {remote_id} "
-            f"(Peer {remote_id} now has {remote_piece_count} pieces)."
+            f"Peer {self.peer_id} received the 'not interested' message from {remote_id}."
         )
 
     def log_downloaded_piece(self, piece_index: int, remote_id: int, num_pieces: int) -> None:
         self.log(
-            f"Peer {self.peer_id} has downloaded the piece {piece_index} from Peer {remote_id}. "
-            f"Now the number of pieces it has is {num_pieces}."
+            f"Peer {self.peer_id} has downloaded the piece {piece_index} from "
+            f"{remote_id}. Now the number of pieces it has is {num_pieces}."
         )
 
     def log_completed_file(self) -> None:

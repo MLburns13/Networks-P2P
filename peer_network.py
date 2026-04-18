@@ -603,8 +603,7 @@ class PeerNetwork:
                         self.peer_state.set_peer_interested(peer_id, True)
                         if self.logger:
                             # Pieces they want = pieces we have that they don't
-                            wanted = self.peer_state.get_interesting_pieces_for(peer_id)
-                            self.logger.log_received_interested(peer_id, wanted)
+                            self.logger.log_received_interested(peer_id)
                         print(f"[PeerNetwork] Peer {peer_id} is INTERESTED in us")
                         
                 # --------------------------------------------------------
@@ -614,8 +613,7 @@ class PeerNetwork:
                     if peer_id > 0:
                         self.peer_state.set_peer_interested(peer_id, False)
                         if self.logger:
-                            piece_count = self.peer_state.get_neighbor_piece_count(peer_id)
-                            self.logger.log_received_not_interested(peer_id, piece_count)
+                            self.logger.log_received_not_interested(peer_id)
                         print(f"[PeerNetwork] Peer {peer_id} is NOT_INTERESTED in us")
                         
                 # --------------------------------------------------------
@@ -652,7 +650,7 @@ class PeerNetwork:
                         needed = not self.peer_state.has_piece(piece_index)
                         self.peer_state.neighbor_set_piece(peer_id, piece_index)
                         if self.logger:
-                            self.logger.log_received_have(peer_id, piece_index, needed)
+                            self.logger.log_received_have(peer_id, piece_index)
                         print(f"[PeerNetwork] Peer {peer_id} has piece {piece_index}")
                         # Re-evaluate interest
                         self._sync_interest_for_peer(peer_id, conn)
