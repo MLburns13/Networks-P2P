@@ -204,6 +204,7 @@ class PeerNetwork:
 
         candidates = self.peer_state.get_choked_interested_neighbors(exclude=self._preferred_ids)
         if not candidates:
+            print(f"[OPT-UNCHOKE-TIMER] No choked interested neighbors available to unchoke.")
             return
 
         chosen = random.choice(candidates)
@@ -389,6 +390,7 @@ class PeerNetwork:
                 continue
             try:
                 conn.send(protocol.create_message(protocol.MsgType.HAVE, struct.pack(">I", piece_index)))
+                print(f"[HAVE] Peer {self.my_peer_id} broadcasting HAVE(piece={piece_index}) to {pid}")
             except Exception as e:
                 print(f"[PeerNetwork] failed to send HAVE({piece_index}) to {pid}: {e}")      
 
