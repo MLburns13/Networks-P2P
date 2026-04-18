@@ -471,22 +471,23 @@ class PeerNetwork:
         assert self.file_manager is not None
         assert self.logger is not None
 
-        outstanding = self.peer_state.get_outstanding_request(remote_id)
-        if outstanding != piece_index:
-            if not self.peer_state.is_peer_choking_us(remote_id):
-                self._request_next_piece(remote_id)
-            return
-
+        # Always write the piece to disk if it's valid
         try:
             self.file_manager.write_piece(piece_index, piece_data)
         except Exception as e:
             print(f"[PeerNetwork] failed writing piece {piece_index}: {e}")
-            self.peer_state.clear_outstanding_request(remote_id)
             return
 
+        # Clear outstanding request: whether it matches or not, we received a piece successfully
+        outstanding = self.peer_state.get_outstanding_request(remote_id)
         self.peer_state.clear_outstanding_request(remote_id)
+        
+        if outstanding != piece_index:
+            # Received a piece we didn't request (out-of-order or from peer buffer).
+            # This is OK - we still write it and mark it as downloaded.
+            print(f"[PeerNetwork] Received unsolicited piece {piece_index} from {remote_id} (expected {outstanding})")
 
-        # Track download rate (Missing component #1 – rate tracking)
+        # Track download rate
         self.peer_state.record_download(remote_id, len(piece_data))
 
         piece_count = self.peer_state.mark_piece_downloaded(piece_index)
@@ -513,12 +514,14 @@ class PeerNetwork:
                 self.logger.log_completed_file()
                 self._completion_logged = True
 
-            # Check global termination (Missing component #5)
+            # Check global termination
             self._check_termination()
             # Don't request more pieces, but keep processing messages
             return
 
-        # Request the next piece from the same peer, if possible.
+        # Always attempt to request the next piece. We cleared any outstanding request,
+        # so we're ready to request again. This ensures we don't get stuck waiting for
+        # a piece that may not arrive (e.g., due to out-of-order delivery).
         self._request_next_piece(remote_id)
 
     # ----------------------------------------------------------------
