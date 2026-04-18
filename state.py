@@ -169,6 +169,24 @@ class PeerState:
             ]
 
             if not candidates:
+                # DEBUG: Log why we have no candidates
+                neighbor_count = sum(1 for i in range(self.num_pieces) if ns.bitfield.has_piece(i))
+                my_count = self.my_bitfield.count()
+                pieces_neighbor_has_we_dont = [
+                    i for i in range(self.num_pieces)
+                    if ns.bitfield.has_piece(i) and not self.my_bitfield.has_piece(i)
+                ]
+                pieces_requested_that_neighbor_has = [
+                    i for i in self.requested_pieces
+                    if ns.bitfield.has_piece(i) and not self.my_bitfield.has_piece(i)
+                ]
+                print(f"[SELECT-PIECE-DEBUG] Peer has no candidates from {peer_id}: "
+                      f"neighbor_pieces={neighbor_count}, my_pieces={my_count}, "
+                      f"needed_from_neighbor={len(pieces_neighbor_has_we_dont)}, "
+                      f"requested_count={len(self.requested_pieces)}, "
+                      f"requested_from_this_neighbor={len(pieces_requested_that_neighbor_has)}")
+                if pieces_requested_that_neighbor_has:
+                    print(f"  → Blocked pieces from {peer_id}: {pieces_requested_that_neighbor_has[:10]}...")
                 return None
 
             return random.choice(candidates)

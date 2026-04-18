@@ -393,10 +393,18 @@ class PeerNetwork:
             self.peer_state.set_am_interested(remote_id, True)
             try:
                 conn.send(protocol.create_message(protocol.MsgType.INTERESTED))
-                print(f"[INTERESTED] Peer {self.my_peer_id} sent INTERESTED to {remote_id}")
+                print(f"[INTERESTED] Peer {self.my_peer_id} sent INTERESTED to {remote_id} (missing={len(missing)} pieces)")
             except Exception as e:
                 print(f"[PeerNetwork] failed to send INTERESTED to {remote_id}: {e}")
         elif not interested and current:
+            # DEBUG: Log when we're sending NOT_INTERESTED
+            neighbor_count = self.peer_state.get_neighbor_piece_count(remote_id)
+            my_count = self.peer_state.my_bitfield.count()
+            requested_count = len(self.peer_state.requested_pieces)
+            print(f"[NOT-INTERESTED-DEBUG] Peer {self.my_peer_id} considering NOT_INTERESTED to {remote_id}: "
+                  f"neighbor_has={neighbor_count}, we_have={my_count}, requested={requested_count}, "
+                  f"missing_from_neighbor={len(missing)}")
+            
             self.peer_state.set_am_interested(remote_id, False)
             try:
                 conn.send(protocol.create_message(protocol.MsgType.NOT_INTERESTED))
@@ -434,7 +442,11 @@ class PeerNetwork:
             # 1. They don't have any pieces we need
             # 2. All their interesting pieces are already requested
             # 3. We already have all pieces they have
-            print(f"[REQUEST] Peer {self.my_peer_id} has no available pieces to request from {remote_id}")
+            my_count = self.peer_state.my_bitfield.count()
+            neighbor_count = self.peer_state.get_neighbor_piece_count(remote_id)
+            interested = self.peer_state.is_am_interested_in_peer(remote_id)
+            print(f"[REQUEST-FAIL] Peer {self.my_peer_id} cannot request from {remote_id}: "
+                  f"no_candidates (neighbor={neighbor_count}, me={my_count}, interested={interested})")
             return
 
         if not self.peer_state.reserve_request(remote_id, next_piece):
