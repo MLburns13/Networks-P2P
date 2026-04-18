@@ -194,6 +194,24 @@ class PeerNetwork:
                         print(f"[UNCHOKE-TIMER] Sent CHOKE to {pid} (no longer preferred)")
                     except Exception as e:
                         print(f"[PeerNetwork] failed to send CHOKE to {pid}: {e}")
+        
+        self._restart_stalled_requests()
+                        
+    def _restart_stalled_requests(self):
+        """For every peer we're unchoked by and interested in, ensure there
+        is an outstanding request. Recovers from any stalled download loop."""
+        assert self.peer_state is not None
+        with self.connections_lock:
+            peer_ids = [pid for pid in self.connections if pid > 0]
+
+        for pid in peer_ids:
+            if (not self.peer_state.is_peer_choking_us(pid)
+                    and self.peer_state.is_am_interested_in_peer(pid)
+                    and self.peer_state.get_outstanding_request(pid) is None):
+                conn = self.get_connection(pid)
+                if conn is not None:
+                    print(f"[WATCHDOG] Restarting stalled request loop with peer {pid}")
+                    self._maybe_request_piece(pid, conn)
 
     def _select_optimistic_neighbor(self):
         """Pick a random choked-but-interested neighbor to optimistically unchoke."""
@@ -455,6 +473,8 @@ class PeerNetwork:
 
         outstanding = self.peer_state.get_outstanding_request(remote_id)
         if outstanding != piece_index:
+            if not self.peer_state.is_peer_choking_us(remote_id):
+                self._request_next_piece(remote_id)
             return
 
         try:
