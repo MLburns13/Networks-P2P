@@ -471,20 +471,24 @@ class PeerNetwork:
         assert self.file_manager is not None
         assert self.logger is not None
 
-        # Always write the piece to disk if it's valid
+        # Get outstanding request BEFORE attempting write
+        outstanding = self.peer_state.get_outstanding_request(remote_id)
+        
+        # Attempt to write the piece to disk
         try:
             self.file_manager.write_piece(piece_index, piece_data)
         except Exception as e:
             print(f"[PeerNetwork] failed writing piece {piece_index}: {e}")
+            # Still clear the outstanding request so we don't get stuck
+            self.peer_state.clear_outstanding_request(remote_id)
             return
 
-        # Clear outstanding request: whether it matches or not, we received a piece successfully
-        outstanding = self.peer_state.get_outstanding_request(remote_id)
+        # Clear outstanding request: whether it matches or not, we received and wrote a piece successfully
         self.peer_state.clear_outstanding_request(remote_id)
         
         if outstanding != piece_index:
             # Received a piece we didn't request (out-of-order or from peer buffer).
-            # This is OK - we still write it and mark it as downloaded.
+            # This is OK - we already wrote it and marked it as downloaded.
             print(f"[PeerNetwork] Received unsolicited piece {piece_index} from {remote_id} (expected {outstanding})")
 
         # Track download rate
