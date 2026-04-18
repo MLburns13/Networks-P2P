@@ -112,6 +112,9 @@ class PeerState:
                 ns = self.neighbors[peer_id]
                 if ns.bitfield.complete():
                     self._completed_neighbor_ids.add(peer_id)
+                if ns.outstanding_request is not None:
+                    self.requested_pieces.discard(ns.outstanding_request)
+                    ns.outstanding_request = None
                 del self.neighbors[peer_id]
 
     def update_neighbor_bitfield(self, peer_id: int, bitfield_bytes: bytes):
