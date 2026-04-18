@@ -204,6 +204,9 @@ class PeerState:
     def mark_piece_downloaded(self, piece_index: int) -> int:
         with self.lock:
             self.my_bitfield.set_piece(piece_index)
+            # CRITICAL: Remove from requested_pieces if it's there
+            # This prevents stalls where a piece is downloaded but stays blocked in requested_pieces
+            self.requested_pieces.discard(piece_index)
             return self.my_bitfield.count()
 
     def has_complete_file(self) -> bool:
