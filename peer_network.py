@@ -748,6 +748,15 @@ class PeerNetwork:
                 if pid > 0 and self.peer_state:
                     self.peer_state.remove_neighbor(pid)
         print(f"[PeerNetwork] Connection closed: {conn.name}")
+        
+        if self.peer_state and self._completion_logged:
+            with self.connections_lock:
+                no_connections_left = len(self.connections) == 0
+            if no_connections_left and self.peer_state.has_complete_file():
+                print(f"[PeerNetwork:{self.my_peer_id}] All connections closed and file is complete – signalling termination.")
+                self.all_done.set()
+            else:
+                self._check_termination()
 
     def get_connection(self, peer_id: int) -> Optional[connection.Connection]:
         with self.connections_lock:
